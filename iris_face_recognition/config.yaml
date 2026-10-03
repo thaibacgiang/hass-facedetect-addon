@@ -2,7 +2,7 @@ name: IRIS Face Recognition
 version: "1.1.0"
 slug: iris_face_recognition
 description: Nhận diện khuôn mặt cục bộ cho Home Assistant (IRIS/InsightFace) - bản tiếng Việt, tự xóa ảnh khi đầy
-url: https://github.com/anhnvme/facedetect
+url: https://github.com/thaibacgiang/facedetect
 arch:
   - amd64
   - aarch64
