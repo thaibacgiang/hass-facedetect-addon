@@ -11,7 +11,7 @@ IRIS chạy nhận diện khuôn mặt local bằng InsightFace. Database, ảnh
 ### Thông tin nhanh
 
 - Add-on folder: `iris_face_recognition/`
-- Image chạy bên trong: `ghcr.io/anhnvme/facedetect:1.0.2`
+- Image gốc: `ghcr.io/anhnvme/facedetect:1.0.2` (giao diện được build lại từ thư mục `iris_face_recognition/app/` với bản dịch tiếng Việt)
 - Container port: `80`
 - Host port mặc định: `8080`
 - Data mặc định trong container: `/data`
@@ -29,7 +29,17 @@ IRIS chạy nhận diện khuôn mặt local bằng InsightFace. Database, ảnh
 
 ```yaml
 data_dir: /homeassistant/iris
+max_storage_mb: 2048
+storage_target_percent: 90
+auto_cleanup: true
 ```
+
+- `max_storage_mb`: dung lượng ảnh tối đa (MB). Vượt mức này, hệ thống tự xóa ảnh cũ nhất.
+- `storage_target_percent`: xóa xuống còn bao nhiêu % của mức tối đa (mặc định 90%) để không phải dọn liên tục.
+- `auto_cleanup`: bật/tắt tự động xóa. Hệ thống kiểm tra mỗi 10 phút và sau mỗi lần nhận diện.
+- Có thể chỉnh trực tiếp trong giao diện web: **Cài đặt → Lưu trữ**. Giá trị trong tùy chọn add-on sẽ được áp dụng lại mỗi lần add-on khởi động.
+- Ảnh người lạ và khuôn mặt đã huấn luyện được bảo vệ, không bị xóa tự động.
+
 
 `data_dir` là path mà add-on đưa cho IRIS làm thư mục `/data` để lưu dữ liệu.
 
@@ -92,7 +102,16 @@ IRIS runs local face recognition with InsightFace. The database, uploaded images
 
 ```yaml
 data_dir: /homeassistant/iris
+max_storage_mb: 2048
+storage_target_percent: 90
+auto_cleanup: true
 ```
+
+- `max_storage_mb`: maximum image storage in MB. When exceeded, the oldest images are deleted automatically.
+- `storage_target_percent`: clean down to this percentage of the limit (default 90%).
+- `auto_cleanup`: enable or disable automatic cleanup (checked every 10 minutes and after each recognition).
+- Also editable in the web UI under **Settings -> Storage**. Add-on options are re-applied on every add-on start.
+- Unknown-visitor originals and trained faces are protected and never auto-deleted.
 
 `data_dir` is the path passed to IRIS as its `/data` storage directory.
 

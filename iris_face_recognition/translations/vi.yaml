@@ -1,0 +1,17 @@
+configuration:
+  data_dir:
+    name: Thư mục dữ liệu
+    description: >-
+      Nơi lưu cơ sở dữ liệu, mô hình và ảnh. Dùng /homeassistant/iris (xem được bằng File editor),
+      /share/iris (truy cập qua Samba) hoặc /media/iris.
+  max_storage_mb:
+    name: Dung lượng ảnh tối đa (MB)
+    description: Khi dung lượng ảnh vượt mức này, hệ thống sẽ tự xóa ảnh cũ nhất (từ 256 đến 102400 MB).
+  storage_target_percent:
+    name: Dọn xuống còn (%)
+    description: Sau khi vượt mức tối đa, xóa ảnh cũ cho đến khi dung lượng còn lại bằng tỷ lệ này (50 đến 99).
+  auto_cleanup:
+    name: Tự động xóa ảnh khi đầy
+    description: Bật để hệ thống tự dọn ảnh cũ mỗi 10 phút và sau mỗi lần nhận diện.
+network:
+  80/tcp: Cổng giao diện web và API của IRIS

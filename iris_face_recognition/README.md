@@ -12,7 +12,17 @@ IRIS nhận diện khuôn mặt local bằng InsightFace. Dữ liệu được l
 
 ```yaml
 data_dir: /homeassistant/iris
+max_storage_mb: 2048
+storage_target_percent: 90
+auto_cleanup: true
 ```
+
+- `max_storage_mb`: dung lượng ảnh tối đa (MB). Vượt mức này, hệ thống tự xóa ảnh cũ nhất.
+- `storage_target_percent`: xóa xuống còn bao nhiêu % của mức tối đa (mặc định 90%) để không phải dọn liên tục.
+- `auto_cleanup`: bật/tắt tự động xóa. Hệ thống kiểm tra mỗi 10 phút và sau mỗi lần nhận diện.
+- Có thể chỉnh trực tiếp trong giao diện web: **Cài đặt → Lưu trữ**. Giá trị trong tùy chọn add-on sẽ được áp dụng lại mỗi lần add-on khởi động.
+- Ảnh người lạ và khuôn mặt đã huấn luyện được bảo vệ, không bị xóa tự động.
+
 
 - `data_dir`: path mà add-on đưa cho IRIS làm thư mục `/data`.
 - Mặc định `/homeassistant/iris` để xem được bằng File editor trong thư mục cấu hình Home Assistant.
@@ -56,7 +66,16 @@ IRIS runs local face recognition with InsightFace. Data stays on the Home Assist
 
 ```yaml
 data_dir: /homeassistant/iris
+max_storage_mb: 2048
+storage_target_percent: 90
+auto_cleanup: true
 ```
+
+- `max_storage_mb`: maximum image storage in MB. When exceeded, the oldest images are deleted automatically.
+- `storage_target_percent`: clean down to this percentage of the limit (default 90%).
+- `auto_cleanup`: enable or disable automatic cleanup (checked every 10 minutes and after each recognition).
+- Also editable in the web UI under **Settings -> Storage**. Add-on options are re-applied on every add-on start.
+- Unknown-visitor originals and trained faces are protected and never auto-deleted.
 
 - `data_dir`: path passed to IRIS as its `/data` directory.
 - The default `/homeassistant/iris` is visible from File editor inside the Home Assistant configuration directory.

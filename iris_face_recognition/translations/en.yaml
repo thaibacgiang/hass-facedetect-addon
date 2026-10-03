@@ -1,0 +1,15 @@
+configuration:
+  data_dir:
+    name: Data directory
+    description: Where the database, models and images are stored.
+  max_storage_mb:
+    name: Max image storage (MB)
+    description: When image storage exceeds this value, the oldest images are deleted automatically.
+  storage_target_percent:
+    name: Clean down to (%)
+    description: After exceeding the limit, delete old images until usage drops to this percentage of the limit.
+  auto_cleanup:
+    name: Auto-delete images when full
+    description: Check every 10 minutes and after each recognition.
+network:
+  80/tcp: IRIS web UI and API port

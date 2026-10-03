@@ -1,7 +1,7 @@
 name: IRIS Face Recognition
-version: "1.0.2"
+version: "1.1.0"
 slug: iris_face_recognition
-description: Local face recognition for Home Assistant using IRIS/InsightFace
+description: Nhận diện khuôn mặt cục bộ cho Home Assistant (IRIS/InsightFace) - bản tiếng Việt, tự xóa ảnh khi đầy
 url: https://github.com/anhnvme/facedetect
 arch:
   - amd64
@@ -14,7 +14,7 @@ webui: http://[HOST]:[PORT:80]
 ports:
   80/tcp: 8080
 ports_description:
-  80/tcp: IRIS web UI and API
+  80/tcp: Giao diện web và API của IRIS
 map:
   - type: homeassistant_config
     read_only: false
@@ -23,5 +23,11 @@ map:
   - media:rw
 options:
   data_dir: /homeassistant/iris
+  max_storage_mb: 2048
+  storage_target_percent: 90
+  auto_cleanup: true
 schema:
   data_dir: str
+  max_storage_mb: int(256,102400)
+  storage_target_percent: int(50,99)
+  auto_cleanup: bool
