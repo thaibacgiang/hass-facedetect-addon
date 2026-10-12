@@ -1,6 +1,7 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
+import { toast } from "sonner";
 import {
   Search,
   Calendar,
@@ -10,6 +11,7 @@ import {
   XCircle,
   Camera,
   Clock,
+  Trash2,
 } from "lucide-react";
 
 import { PageHeader, PageShell } from "@/components/page-shell";
@@ -18,6 +20,17 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Slider } from "@/components/ui/slider";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import {
   Select,
   SelectContent,
@@ -96,6 +109,9 @@ function EventsList() {
   const [type, setType] = useState("all-type");
   const [minConfidence, setMinConfidence] = useState([0]);
   const [page, setPage] = useState(1);
+  const queryClient = useQueryClient();
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const serverFilters = {
     event_type: type === "all-type" ? "" : type,
     camera_id: camera === "all-cam" ? "" : camera,
@@ -108,6 +124,7 @@ function EventsList() {
   const events = useMemo(() => eventsPage?.items ?? [], [eventsPage?.items]);
 
   useEffect(() => setPage(1), [camera, person, type]);
+  useEffect(() => setSelected(new Set()), [page, camera, person, type]);
 
   const filtered = useMemo(
     () =>
@@ -119,6 +136,42 @@ function EventsList() {
       }),
     [events, minConfidence, search],
   );
+
+  const allSelected = filtered.length > 0 && filtered.every((e) => selected.has(e.id));
+  const someSelected = filtered.some((e) => selected.has(e.id));
+
+  const toggleOne = (id: string, checked: boolean) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+
+  const toggleAll = (checked: boolean) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      for (const e of filtered) {
+        if (checked) next.add(e.id);
+        else next.delete(e.id);
+      }
+      return next;
+    });
+
+  const deleteSelected = useMutation({
+    mutationFn: (ids: string[]) => api.deleteEvents(ids),
+    onSuccess: (result) => {
+      toast.success(`Đã xóa ${result.deleted} sự kiện`);
+      setSelected(new Set());
+      setConfirmOpen(false);
+      queryClient.invalidateQueries({ queryKey: ["events"] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      queryClient.invalidateQueries({ queryKey: ["unknown"] });
+      queryClient.invalidateQueries({ queryKey: ["unknowns"] });
+      queryClient.invalidateQueries({ queryKey: ["summary"] });
+    },
+    onError: (err: Error) => toast.error(err.message),
+  });
 
   const exportCsv = () => {
     const rows = [
@@ -233,13 +286,43 @@ function EventsList() {
       </Card>
 
       <Card className="overflow-hidden border-border bg-card p-0">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-3 py-2 sm:px-4">
+          <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+            <Checkbox
+              checked={allSelected ? true : someSelected ? "indeterminate" : false}
+              onCheckedChange={(v) => toggleAll(v === true)}
+              disabled={filtered.length === 0}
+              aria-label="Chọn tất cả sự kiện"
+            />
+            {selected.size > 0 ? `Đã chọn ${selected.size} sự kiện` : "Chọn tất cả"}
+          </label>
+          <Button
+            variant="destructive"
+            size="sm"
+            disabled={selected.size === 0 || deleteSelected.isPending}
+            onClick={() => setConfirmOpen(true)}
+          >
+            <Trash2 className="mr-2 h-4 w-4" /> Xóa các mục đã chọn
+            {selected.size > 0 ? ` (${selected.size})` : ""}
+          </Button>
+        </div>
         <div className="divide-y divide-border">
           {filtered.map((event: EventItem) => (
-            <Link
+            <div
               key={event.id}
+              className="flex items-stretch hover:bg-surface-elevated/40"
+            >
+              <label className="flex shrink-0 cursor-pointer items-center pl-3 pr-1 sm:pl-4">
+                <Checkbox
+                  checked={selected.has(event.id)}
+                  onCheckedChange={(v) => toggleOne(event.id, v === true)}
+                  aria-label={`Chọn sự kiện ${event.id}`}
+                />
+              </label>
+            <Link
               to="/events/$eventId"
               params={{ eventId: event.id }}
-              className="flex gap-3 px-3 py-3 hover:bg-surface-elevated/40 sm:grid sm:grid-cols-12 sm:items-center sm:px-4"
+              className="flex min-w-0 flex-1 gap-3 px-3 py-3 sm:grid sm:grid-cols-12 sm:items-center sm:px-4"
             >
               <Snapshot
                 size="sm"
@@ -290,6 +373,7 @@ function EventsList() {
                 </div>
               </div>
             </Link>
+            </div>
           ))}
           {filtered.length === 0 && (
             <div className="px-4 py-8 text-center text-sm text-muted-foreground">
@@ -322,6 +406,31 @@ function EventsList() {
           </div>
         </div>
       </Card>
+
+      <AlertDialog open={confirmOpen} onOpenChange={(open) => !deleteSelected.isPending && setConfirmOpen(open)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Xóa {selected.size} sự kiện đã chọn?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Các sự kiện và ảnh liên quan (nếu không còn nơi nào khác sử dụng) sẽ bị xóa vĩnh viễn.
+              Thao tác này không thể hoàn tác.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleteSelected.isPending}>Hủy</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              disabled={selected.size === 0 || deleteSelected.isPending}
+              onClick={(e) => {
+                e.preventDefault();
+                deleteSelected.mutate(Array.from(selected));
+              }}
+            >
+              {deleteSelected.isPending ? "Đang xóa..." : "Xóa"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </PageShell>
   );
 }

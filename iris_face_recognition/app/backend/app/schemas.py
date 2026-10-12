@@ -72,3 +72,7 @@ class MqttSettingsIn(BaseModel):
 class TelegramSettingsIn(BaseModel):
     bot_token: str = ""
     chat_id: str = ""
+
+
+class EventsBulkDeleteIn(BaseModel):
+    ids: list[str] = Field(min_length=1, max_length=1000)

@@ -20,7 +20,7 @@ from . import insightface_engine, mqtt_homeassistant, telegram_notify
 from .camera_utils import ensure_unique_camera_name, serialize_camera, unique_camera_slug
 from .db import UPLOAD_DIR, add_log, clear_database, connect, get_setting, init_db, new_id, prune_logs, row_to_dict, rows_to_dicts, set_setting, utc_now
 from .people_utils import display_person_name, person_name_from_external_id, person_preview_data, serialize_person
-from .schemas import InsightFaceSettingsIn, CameraIn, LogsSettingsIn, MqttSettingsIn, PersonIn, StorageSettingsIn, TelegramSettingsIn, ThresholdsIn
+from .schemas import EventsBulkDeleteIn, InsightFaceSettingsIn, CameraIn, LogsSettingsIn, MqttSettingsIn, PersonIn, StorageSettingsIn, TelegramSettingsIn, ThresholdsIn
 from .storage_service import DEFAULT_STORAGE, cleanup_storage_to_quota, delete_unreferenced_uploads, enforce_storage_quota, normalize_upload_ref, start_storage_cleanup_job, stop_storage_cleanup_job, storage_config, storage_status, sync_storage_from_env
 from .uploads import create_event_images, crop_saved_image_to_face, fetch_still_image, safe_upload_path, save_image_bytes, save_upload
 
@@ -1220,6 +1220,36 @@ def event_has_trained_face(conn: sqlite3.Connection, event: dict) -> bool:
         paths,
     ).fetchone()
     return row is not None
+
+
+@app.post("/api/events/bulk-delete")
+def bulk_delete_events(payload: EventsBulkDeleteIn) -> dict:
+    ids = list(dict.fromkeys(payload.ids))
+    image_paths: list[str] = []
+    deleted = 0
+    with connect() as conn:
+        for event_id in ids:
+            event = row_to_dict(conn.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone())
+            if event is None:
+                continue
+            image_paths.extend([event.get("image_path") or "", event.get("thumb_path") or "", event.get("face_crop_path") or ""])
+            image_paths.extend(
+                row["image_path"]
+                for row in conn.execute(
+                    "SELECT image_path FROM unknown_visitors WHERE event_id = ? AND image_path != ''",
+                    (event_id,),
+                ).fetchall()
+            )
+            conn.execute("DELETE FROM unknown_visitors WHERE event_id = ?", (event_id,))
+            conn.execute("DELETE FROM events WHERE id = ?", (event_id,))
+            deleted += 1
+        add_log(conn, "Recognition", "warn", f"Đã xóa {deleted} sự kiện đã chọn")
+    deleted_files = delete_unreferenced_uploads(image_paths)
+    if deleted_files:
+        with connect() as conn:
+            add_log(conn, "System", "info", f"Đã xóa {deleted_files} ảnh sự kiện không còn được dùng")
+    publish_mqtt_state_if_configured()
+    return {"ok": True, "deleted": deleted}
 
 
 @app.delete("/api/events/{event_id}")

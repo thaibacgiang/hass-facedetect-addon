@@ -184,6 +184,11 @@ export const api = {
   },
   event: async (id: string) => normalizeEvent(await request<EventItem>(`/api/events/${id}`)),
   deleteEvent: (id: string) => request<{ ok: boolean }>(`/api/events/${id}`, { method: "DELETE" }),
+  deleteEvents: (ids: string[]) =>
+    request<{ ok: boolean; deleted: number }>(`/api/events/bulk-delete`, {
+      method: "POST",
+      body: JSON.stringify({ ids }),
+    }),
   trainEvent: async (eventId: string, personId: string) => {
     const result = await request<{ ok: boolean; face_id: string; event: EventItem }>(
       `/api/events/${eventId}/train/${personId}`,
