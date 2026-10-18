@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.0 - 2026-10-18
+
+- **Chụp liên tiếp nhiều khung hình** mỗi lần kích hoạt (mặc định 5 khung, cách nhau 1 giây) thay vì chỉ 1 ảnh đúng lúc bấm nút. Dừng sớm khi nhận ra người quen, nếu không thì chọn khung tốt nhất (có mặt, giống nhất, mặt to nhất). Chỉ lưu 1 ảnh được chọn.
+- **Tự động quét camera** không cần bấm nút: đặt chu kỳ (giây) trong trang chi tiết camera; chỉ tạo sự kiện khi thấy khuôn mặt, không lưu ảnh khi không có người. Mặc định tắt.
+- Sửa lỗi thời gian chờ (cooldown): trước đây bắt đầu tính ngay lúc bấm nút nên một lần bấm khi chưa có người sẽ khóa camera cả phút. Giờ chỉ tính từ lần thật sự phát hiện khuôn mặt.
+- Chặn chạy trùng: bấm nút liên tục khi camera đang xử lý sẽ không tạo nhiều luồng nhận diện song song.
+- Thêm 3 tùy chọn mỗi camera: `burst_count`, `burst_interval_ms`, `auto_interval` (tự nâng cấp cơ sở dữ liệu cũ, camera cũ dùng giá trị mặc định).
+
 ## 1.1.2 - 2026-10-18
 
 - Sửa giới hạn lưu nhật ký: khi đủ số dòng đã đặt, hệ thống xóa đúng các dòng cũ nhất và luôn giữ các dòng mới nhất (trước đây nhiều log trong cùng 1 giây bị xóa/giữ lẫn lộn do sắp xếp theo thời gian chỉ chính xác đến giây).

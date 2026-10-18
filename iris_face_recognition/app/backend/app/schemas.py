@@ -38,6 +38,12 @@ class CameraIn(BaseModel):
     cooldown: int = 60
     min_face: int = 8
     min_confidence: int = 80
+    # Số khung hình tối đa chụp liên tiếp mỗi lần kích hoạt (dừng sớm khi nhận ra người quen)
+    burst_count: int = Field(default=5, ge=1, le=15)
+    # Khoảng cách giữa các khung hình (mili-giây)
+    burst_interval_ms: int = Field(default=1000, ge=200, le=5000)
+    # Tự động quét camera mỗi N giây để tìm khuôn mặt, không cần bấm nút. 0 = tắt
+    auto_interval: int = Field(default=0, ge=0, le=300)
 
 
 class ThresholdsIn(BaseModel):

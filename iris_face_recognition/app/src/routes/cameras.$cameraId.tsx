@@ -36,12 +36,18 @@ function CameraDetail() {
   const [name, setName] = useState("");
   const [stillUrl, setStillUrl] = useState("");
   const [cooldown, setCooldown] = useState([60]);
+  const [burstCount, setBurstCount] = useState([5]);
+  const [burstIntervalMs, setBurstIntervalMs] = useState([1000]);
+  const [autoInterval, setAutoInterval] = useState([0]);
 
   useEffect(() => {
     if (!camera) return;
     setName(camera.name);
     setStillUrl(camera.still_url || camera.stream_url || "");
     setCooldown([camera.cooldown]);
+    setBurstCount([camera.burst_count ?? 5]);
+    setBurstIntervalMs([camera.burst_interval_ms ?? 1000]);
+    setAutoInterval([camera.auto_interval ?? 0]);
   }, [camera]);
 
   const save = useMutation({
@@ -55,6 +61,9 @@ function CameraDetail() {
         cooldown: cooldown[0],
         min_face: camera?.min_face ?? 8,
         min_confidence: camera?.min_confidence ?? 80,
+        burst_count: burstCount[0],
+        burst_interval_ms: burstIntervalMs[0],
+        auto_interval: autoInterval[0],
       }),
     onSuccess: () => {
       toast.success("Đã lưu camera");
@@ -180,7 +189,7 @@ function CameraDetail() {
         <Card className="border-border bg-card p-5">
           <h3 className="text-sm font-semibold">Thời gian chờ</h3>
           <p className="mt-1 text-xs text-muted-foreground">
-            Tránh gọi InsightFace trùng lặp trong khoảng thời gian này sau mỗi lần kích hoạt.
+            Sau mỗi lần phát hiện được khuôn mặt, bỏ qua các lần kích hoạt trong khoảng thời gian này để tránh gọi InsightFace trùng lặp.
           </p>
           <div className="mt-4">
             <div className="flex justify-between text-xs">
@@ -229,6 +238,56 @@ function CameraDetail() {
                   <Copy className="h-4 w-4" />
                 </Button>
               </div>
+            </div>
+          </div>
+        </Card>
+
+        <Card className="border-border bg-card p-5 lg:col-span-2">
+          <h3 className="text-sm font-semibold">Chụp liên tiếp &amp; tự động quét</h3>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Mỗi lần kích hoạt, hệ thống chụp nhiều khung hình liên tiếp và dừng ngay khi nhận ra người
+            quen, thay vì chỉ chụp một ảnh đúng lúc bấm nút (lúc đó người thường chưa vào khung hình).
+          </p>
+          <div className="mt-4 grid grid-cols-1 gap-6 md:grid-cols-3">
+            <div>
+              <div className="flex justify-between text-xs">
+                <span className="text-muted-foreground">Số khung hình tối đa</span>
+                <span className="font-mono text-primary">{burstCount[0]}</span>
+              </div>
+              <Slider value={burstCount} onValueChange={setBurstCount} min={1} max={15} step={1} className="mt-2" />
+            </div>
+            <div>
+              <div className="flex justify-between text-xs">
+                <span className="text-muted-foreground">Khoảng cách giữa các khung</span>
+                <span className="font-mono text-primary">{(burstIntervalMs[0] / 1000).toFixed(1)}s</span>
+              </div>
+              <Slider
+                value={burstIntervalMs}
+                onValueChange={setBurstIntervalMs}
+                min={200}
+                max={5000}
+                step={100}
+                className="mt-2"
+              />
+            </div>
+            <div>
+              <div className="flex justify-between text-xs">
+                <span className="text-muted-foreground">Tự động quét (không cần bấm nút)</span>
+                <span className="font-mono text-primary">
+                  {autoInterval[0] === 0 ? "Tắt" : `mỗi ${autoInterval[0]}s`}
+                </span>
+              </div>
+              <Slider
+                value={autoInterval}
+                onValueChange={(value) => setAutoInterval([value[0] === 1 ? 2 : value[0]])}
+                min={0}
+                max={60}
+                step={1}
+                className="mt-2"
+              />
+              <p className="mt-1 text-[11px] text-muted-foreground">
+                Bật sẽ chụp camera định kỳ để tìm khuôn mặt, tốn thêm CPU. Nên đặt từ 3–5 giây.
+              </p>
             </div>
           </div>
         </Card>

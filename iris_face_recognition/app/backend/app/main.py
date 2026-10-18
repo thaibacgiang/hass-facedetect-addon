@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse, Response
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from . import insightface_engine, mqtt_homeassistant, telegram_notify
+from .burst import run_burst
 from .camera_utils import ensure_unique_camera_name, serialize_camera, unique_camera_slug
 from .db import UPLOAD_DIR, add_log, clear_database, connect, get_setting, init_db, new_id, prune_logs, _logs_max_rows, row_to_dict, rows_to_dicts, set_setting, utc_now
 from .people_utils import display_person_name, person_name_from_external_id, person_preview_data, serialize_person
@@ -600,11 +601,13 @@ def startup() -> None:
     restart_mqtt_command_listener()
     sync_storage_from_env()
     start_storage_cleanup_job()
+    start_camera_auto_job()
 
 
 @app.on_event("shutdown")
 def shutdown() -> None:
     stop_storage_cleanup_job()
+    stop_camera_auto_job()
     global mqtt_command_client
     with mqtt_command_lock:
         mqtt_homeassistant.stop_command_listener(mqtt_command_client)
@@ -1672,14 +1675,99 @@ def recognize_image_bytes(
     return event | {"unknown_id": unknown_id}
 
 
-def process_camera_trigger_event(event_id: str, camera: dict) -> None:
+# --- Chống chạy trùng trên cùng một camera -------------------------------------------------
+_camera_busy: set[str] = set()
+_camera_busy_lock = threading.Lock()
+
+
+def _claim_camera(camera_id: str) -> bool:
+    with _camera_busy_lock:
+        if camera_id in _camera_busy:
+            return False
+        _camera_busy.add(camera_id)
+        return True
+
+
+def _release_camera(camera_id: str) -> None:
+    with _camera_busy_lock:
+        _camera_busy.discard(camera_id)
+
+
+def camera_in_cooldown(camera: dict) -> bool:
+    """Chỉ tính thời gian chờ từ lần PHÁT HIỆN được khuôn mặt gần nhất (last_detection)."""
+    if not camera.get("last_detection"):
+        return False
+    try:
+        last = datetime.fromisoformat(camera["last_detection"])
+        now_dt = datetime.fromisoformat(utc_now())
+    except ValueError:
+        return False
+    return (now_dt - last).total_seconds() < int(camera["cooldown"])
+
+
+def load_active_references(conn) -> list[dict]:
+    return rows_to_dicts(
+        conn.execute(
+            """
+            SELECT pf.face_id, pf.person_id, pf.embedding
+            FROM person_faces pf
+            JOIN people p ON p.id = pf.person_id
+            WHERE p.status = 'Active'
+            """
+        ).fetchall()
+    )
+
+
+def make_frame_probe(references: list[dict], match_threshold: float):
+    """Tạo hàm phân tích 1 khung hình -> (có_mặt, độ_giống, diện_tích_mặt)."""
+
+    def probe(image: bytes) -> tuple[bool, float, float]:
+        try:
+            result = insightface_engine.search_face(insightface_config(), image, references, match_threshold)
+        except insightface_engine.InsightFaceError as error:
+            if is_no_face_error(error) or "invalid image" in str(error).lower():
+                return (False, 0.0, 0.0)
+            raise
+        if not result.get("face_detected"):
+            return (False, 0.0, 0.0)
+        box = result.get("bounding_box") or {}
+        area = float(box.get("Width", 0) or 0) * float(box.get("Height", 0) or 0)
+        matches = result.get("matches") or []
+        similarity = float(matches[0]["similarity"]) if matches else 0.0
+        return (True, similarity, area)
+
+    return probe
+
+
+def process_camera_trigger_event(event_id: str, camera: dict, first_frame: tuple[bytes, str] | None = None) -> None:
+    """Chụp liên tiếp nhiều khung hình, chọn khung tốt nhất rồi nhận diện.
+
+    Người gọi phải đã `_claim_camera`; hàm này tự `_release_camera` khi xong.
+    """
     camera_name = camera["name"]
     try:
-        image, suffix = fetch_still_image(camera.get("still_url") or camera.get("stream_url") or "")
-        rel_path = save_image_bytes(image, "events", suffix)
         with connect() as conn:
-            add_log(conn, "Recognition", "info", f"Đang xử lý ảnh tĩnh của camera {camera_name}")
-        recognize_image_bytes(image, rel_path, camera["id"], camera_name, event_id)
+            thresholds = get_setting(conn, "thresholds", {"match": 40, "auto_accept": 55})
+            references = load_active_references(conn)
+        still_url = camera.get("still_url") or camera.get("stream_url") or ""
+        burst = run_burst(
+            lambda: fetch_still_image(still_url),
+            make_frame_probe(references, thresholds["match"]),
+            max_frames=int(camera.get("burst_count") or 5),
+            interval=int(camera.get("burst_interval_ms") or 1000) / 1000,
+            accept_threshold=float(thresholds["auto_accept"]),
+            first_frame=first_frame,
+        )
+        chosen = burst.best or burst.last
+        rel_path = save_image_bytes(chosen.image, "events", chosen.suffix)
+        with connect() as conn:
+            add_log(
+                conn,
+                "Recognition",
+                "info",
+                f"Camera {camera_name}: đã phân tích {burst.tried} khung hình, {burst.face_frames} khung có khuôn mặt",
+            )
+        recognize_image_bytes(chosen.image, rel_path, camera["id"], camera_name, event_id)
     except HTTPException as error:
         detail = str(error.detail)
         label = "No face detected" if is_no_face_error(Exception(detail)) else "Trigger processing failed"
@@ -1691,6 +1779,86 @@ def process_camera_trigger_event(event_id: str, camera: dict) -> None:
         event = mark_event_failed(event_id, "Trigger processing failed", camera_name, str(error), event_type="error", camera_id=camera["id"])
         send_telegram_for_event(event, "Trigger processing failed", "error", 0, event.get("image_path", ""))
         enforce_storage_quota()
+    finally:
+        _release_camera(camera["id"])
+
+
+# --- Tự động quét camera (không cần bấm nút) ---------------------------------------------
+AUTO_SCAN_MIN_INTERVAL = 2
+AUTO_SCAN_ERROR_LOG_SECONDS = 600
+_auto_last_poll: dict[str, float] = {}
+_auto_last_error_log: dict[str, float] = {}
+_auto_thread: threading.Thread | None = None
+_auto_stop = threading.Event()
+
+
+def _auto_log_error(camera: dict, error: Exception) -> None:
+    now = time.monotonic()
+    if now - _auto_last_error_log.get(camera["id"], -1e9) < AUTO_SCAN_ERROR_LOG_SECONDS:
+        return
+    _auto_last_error_log[camera["id"]] = now
+    detail = error.detail if isinstance(error, HTTPException) else error
+    with connect() as conn:
+        add_log(conn, "Recognition", "warn", f"Tự động quét camera {camera['name']} lỗi: {detail}")
+
+
+def camera_auto_scan_once() -> None:
+    with connect() as conn:
+        cameras = rows_to_dicts(
+            conn.execute("SELECT * FROM cameras WHERE status = 'online' AND auto_interval > 0").fetchall()
+        )
+    active_ids = {camera["id"] for camera in cameras}
+    for stale in [key for key in _auto_last_poll if key not in active_ids]:
+        _auto_last_poll.pop(stale, None)
+    detect_only = make_frame_probe([], 100.0)  # chỉ cần biết có khuôn mặt hay không
+    for camera in cameras:
+        interval = max(AUTO_SCAN_MIN_INTERVAL, int(camera["auto_interval"]))
+        now = time.monotonic()
+        if now - _auto_last_poll.get(camera["id"], -1e9) < interval:
+            continue
+        _auto_last_poll[camera["id"]] = now
+        if camera_in_cooldown(camera) or not _claim_camera(camera["id"]):
+            continue
+        started = False
+        try:
+            image, suffix = fetch_still_image(camera.get("still_url") or camera.get("stream_url") or "")
+            has_face, _, _ = detect_only(image)
+            _auto_last_error_log.pop(camera["id"], None)
+            if not has_face:
+                continue
+            event = create_event_shell(camera["id"], camera["name"], update_camera=False)
+            threading.Thread(
+                target=process_camera_trigger_event,
+                args=(event["id"], camera, (image, suffix)),
+                daemon=True,
+            ).start()
+            started = True
+        except Exception as error:  # noqa: BLE001
+            _auto_log_error(camera, error)
+        finally:
+            if not started:
+                _release_camera(camera["id"])
+
+
+def _camera_auto_loop() -> None:
+    while not _auto_stop.wait(1.0):
+        try:
+            camera_auto_scan_once()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def start_camera_auto_job() -> None:
+    global _auto_thread
+    if _auto_thread and _auto_thread.is_alive():
+        return
+    _auto_stop.clear()
+    _auto_thread = threading.Thread(target=_camera_auto_loop, name="camera-auto-scan", daemon=True)
+    _auto_thread.start()
+
+
+def stop_camera_auto_job() -> None:
+    _auto_stop.set()
 
 
 @app.post("/api/recognize")
@@ -1781,10 +1949,10 @@ def create_camera(payload: CameraIn) -> dict:
         conn.execute(
             """
             INSERT INTO cameras
-            (id, name, model, status, stream_url, still_url, trigger_slug, face_detection, motion, cooldown, min_face, min_confidence, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (id, name, model, status, stream_url, still_url, trigger_slug, face_detection, motion, cooldown, min_face, min_confidence, burst_count, burst_interval_ms, auto_interval, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (camera_id, name, payload.model, payload.status, still_url, still_url, trigger_slug, int(payload.face_detection), int(payload.motion), payload.cooldown, payload.min_face, payload.min_confidence, now, now),
+            (camera_id, name, payload.model, payload.status, still_url, still_url, trigger_slug, int(payload.face_detection), int(payload.motion), payload.cooldown, payload.min_face, payload.min_confidence, payload.burst_count, payload.burst_interval_ms, payload.auto_interval, now, now),
         )
         row = row_to_dict(conn.execute("SELECT * FROM cameras WHERE id = ?", (camera_id,)).fetchone())
         add_log(conn, "System", "info", f"Đã tạo camera {name} với trigger {trigger_slug}")
@@ -1801,30 +1969,39 @@ def request_camera_trigger(trigger_slug: str, source: str = "API") -> dict:
     if camera["status"] != "online":
         raise HTTPException(status_code=409, detail="Camera is offline.")
 
-    if camera.get("last_detection"):
-        last = datetime.fromisoformat(camera["last_detection"])
-        now_dt = datetime.fromisoformat(utc_now())
-        if (now_dt - last).total_seconds() < int(camera["cooldown"]):
-            event = create_event_shell(camera["id"], camera["name"], "Skipped cooldown", "skipped", update_camera=False)
-            with connect() as conn:
-                add_log(conn, "Recognition", "warn", f"Bỏ qua kích hoạt {source} cho {camera['name']} do đang trong thời gian chờ")
-            return {
-                "ok": True,
-                "accepted": False,
-                "skipped": True,
-                "reason": "cooldown",
-                "camera_id": camera["id"],
-                "camera_name": camera["name"],
-                "event_id": event["id"],
-                "event": event,
-            }
+    skip_reason = ""
+    if camera_in_cooldown(camera):
+        skip_reason = "cooldown"
+    elif not _claim_camera(camera["id"]):
+        skip_reason = "busy"
+    if skip_reason:
+        event = create_event_shell(camera["id"], camera["name"], f"Skipped {skip_reason}", "skipped", update_camera=False)
+        reason_text = "đang trong thời gian chờ" if skip_reason == "cooldown" else "camera đang xử lý lần kích hoạt trước"
+        with connect() as conn:
+            add_log(conn, "Recognition", "warn", f"Bỏ qua kích hoạt {source} cho {camera['name']} do {reason_text}")
+        return {
+            "ok": True,
+            "accepted": False,
+            "skipped": True,
+            "reason": skip_reason,
+            "camera_id": camera["id"],
+            "camera_name": camera["name"],
+            "event_id": event["id"],
+            "event": event,
+        }
 
-    event = create_event_shell(camera["id"], camera["name"])
-    threading.Thread(
-        target=process_camera_trigger_event,
-        args=(event["id"], camera),
-        daemon=True,
-    ).start()
+    # Không đặt last_detection ở đây: thời gian chờ chỉ bắt đầu khi thật sự thấy khuôn mặt,
+    # nếu không một lần bấm nút lúc chưa có người sẽ "khóa" camera suốt thời gian chờ.
+    try:
+        event = create_event_shell(camera["id"], camera["name"], update_camera=False)
+        threading.Thread(
+            target=process_camera_trigger_event,
+            args=(event["id"], camera),
+            daemon=True,
+        ).start()
+    except Exception:
+        _release_camera(camera["id"])
+        raise
     return {
         "ok": True,
         "accepted": True,
@@ -1887,10 +2064,10 @@ def update_camera(camera_id: str, payload: CameraIn) -> dict:
         conn.execute(
             """
             UPDATE cameras SET name = ?, model = ?, status = ?, stream_url = ?, still_url = ?, trigger_slug = ?, face_detection = ?, motion = ?,
-              cooldown = ?, min_face = ?, min_confidence = ?, updated_at = ?
+              cooldown = ?, min_face = ?, min_confidence = ?, burst_count = ?, burst_interval_ms = ?, auto_interval = ?, updated_at = ?
             WHERE id = ?
             """,
-            (name, payload.model, payload.status, still_url, still_url, trigger_slug, int(payload.face_detection), int(payload.motion), payload.cooldown, payload.min_face, payload.min_confidence, now, camera_id),
+            (name, payload.model, payload.status, still_url, still_url, trigger_slug, int(payload.face_detection), int(payload.motion), payload.cooldown, payload.min_face, payload.min_confidence, payload.burst_count, payload.burst_interval_ms, payload.auto_interval, now, camera_id),
         )
         row = row_to_dict(conn.execute("SELECT * FROM cameras WHERE id = ?", (camera_id,)).fetchone())
         if row is None:

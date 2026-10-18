@@ -132,6 +132,9 @@ def init_db() -> None:
               cooldown INTEGER NOT NULL DEFAULT 60,
               min_face INTEGER NOT NULL DEFAULT 8,
               min_confidence INTEGER NOT NULL DEFAULT 80,
+              burst_count INTEGER NOT NULL DEFAULT 5,
+              burst_interval_ms INTEGER NOT NULL DEFAULT 1000,
+              auto_interval INTEGER NOT NULL DEFAULT 0,
               last_detection TEXT,
               created_at TEXT NOT NULL,
               updated_at TEXT NOT NULL
@@ -215,6 +218,13 @@ def init_db() -> None:
             )
         if get_setting(conn, "telegram") is None:
             set_setting(conn, "telegram", {"bot_token": "", "chat_id": ""})
+        camera_columns = {row["name"] for row in conn.execute("PRAGMA table_info(cameras)").fetchall()}
+        if "burst_count" not in camera_columns:
+            conn.execute("ALTER TABLE cameras ADD COLUMN burst_count INTEGER NOT NULL DEFAULT 5")
+        if "burst_interval_ms" not in camera_columns:
+            conn.execute("ALTER TABLE cameras ADD COLUMN burst_interval_ms INTEGER NOT NULL DEFAULT 1000")
+        if "auto_interval" not in camera_columns:
+            conn.execute("ALTER TABLE cameras ADD COLUMN auto_interval INTEGER NOT NULL DEFAULT 0")
         event_columns = {row["name"] for row in conn.execute("PRAGMA table_info(events)").fetchall()}
         if "face_details_json" not in event_columns:
             conn.execute("ALTER TABLE events ADD COLUMN face_details_json TEXT NOT NULL DEFAULT ''")

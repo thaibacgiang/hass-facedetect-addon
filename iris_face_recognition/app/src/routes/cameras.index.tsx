@@ -45,6 +45,9 @@ function CamerasList() {
         cooldown: cooldown[0],
         min_face: 8,
         min_confidence: 80,
+        burst_count: 5,
+        burst_interval_ms: 1000,
+        auto_interval: 0,
       }),
     onSuccess: () => {
       toast.success("Đã tạo camera");

@@ -52,6 +52,9 @@ export interface Camera {
   cooldown: number;
   min_face: number;
   min_confidence: number;
+  burst_count: number;
+  burst_interval_ms: number;
+  auto_interval: number;
 }
 
 export interface EventItem {

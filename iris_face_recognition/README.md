@@ -29,6 +29,13 @@ auto_cleanup: true
 - Nếu muốn dễ truy cập qua Samba/file editor, dùng `/share/iris`.
 - Nếu muốn đặt trong media storage, dùng `/media/iris`.
 
+### Chụp liên tiếp & tự động quét camera
+
+Vào **Camera → chọn camera** để chỉnh:
+
+- **Số khung hình tối đa / Khoảng cách giữa các khung**: mỗi lần kích hoạt, IRIS chụp nhiều ảnh liên tiếp và dừng ngay khi nhận ra người quen. Giúp nhận diện được khi người chưa kịp đứng vào khung hình lúc bấm nút (chuông, nút nhấn, cảm biến...).
+- **Tự động quét**: IRIS tự chụp camera mỗi N giây, thấy khuôn mặt thì tự nhận diện, không cần bấm nút. Mặc định tắt; nên đặt 3–5 giây vì tốn thêm CPU. Dùng kèm **Thời gian chờ** để không tạo sự kiện liên tục khi người đứng yên trước camera.
+
 ### Port
 
 App lắng nghe container port `80`.
