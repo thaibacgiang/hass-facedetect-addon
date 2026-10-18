@@ -18,7 +18,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from . import insightface_engine, mqtt_homeassistant, telegram_notify
 from .camera_utils import ensure_unique_camera_name, serialize_camera, unique_camera_slug
-from .db import UPLOAD_DIR, add_log, clear_database, connect, get_setting, init_db, new_id, prune_logs, row_to_dict, rows_to_dicts, set_setting, utc_now
+from .db import UPLOAD_DIR, add_log, clear_database, connect, get_setting, init_db, new_id, prune_logs, _logs_max_rows, row_to_dict, rows_to_dicts, set_setting, utc_now
 from .people_utils import display_person_name, person_name_from_external_id, person_preview_data, serialize_person
 from .schemas import EventsBulkDeleteIn, InsightFaceSettingsIn, CameraIn, LogsSettingsIn, MqttSettingsIn, PersonIn, StorageSettingsIn, TelegramSettingsIn, ThresholdsIn
 from .storage_service import DEFAULT_STORAGE, cleanup_storage_to_quota, delete_unreferenced_uploads, enforce_storage_quota, normalize_upload_ref, start_storage_cleanup_job, stop_storage_cleanup_job, storage_config, storage_status, sync_storage_from_env
@@ -1935,8 +1935,7 @@ def save_logs_settings(payload: LogsSettingsIn) -> dict:
 @app.get("/api/logs")
 def list_logs(page: int = 1, limit: int | None = None) -> dict:
     with connect() as conn:
-        cfg = get_setting(conn, "logs", {"max_rows": 500})
-        max_rows = int(cfg.get("max_rows", 500))
+        max_rows = max(50, min(10000, _logs_max_rows(conn)))
         prune_logs(conn, max_rows)
         per_page = max(1, min(limit or 50, 200, max_rows))
         total = conn.execute("SELECT COUNT(*) AS c FROM logs").fetchone()["c"]
@@ -1945,7 +1944,7 @@ def list_logs(page: int = 1, limit: int | None = None) -> dict:
         offset = (current_page - 1) * per_page
         rows = rows_to_dicts(
             conn.execute(
-                "SELECT * FROM logs ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                "SELECT * FROM logs ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?",
                 (per_page, offset),
             ).fetchall()
         )

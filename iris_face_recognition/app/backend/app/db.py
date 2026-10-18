@@ -305,23 +305,32 @@ def clear_database() -> None:
         )
 
 
+def _logs_max_rows(conn: sqlite3.Connection) -> int:
+    """Đọc giới hạn số dòng nhật ký; lỗi cấu hình thì dùng mặc định 500."""
+    try:
+        cfg = get_setting(conn, "logs", {"max_rows": 500}) or {}
+        return int(cfg.get("max_rows", 500))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return 500
+
+
 def prune_logs(conn: sqlite3.Connection, max_rows: int | None = None) -> None:
+    """Giữ tối đa `max_rows` dòng nhật ký mới nhất, xóa các dòng cũ nhất (không bao giờ dừng ghi log).
+
+    Dùng rowid (tăng dần theo thứ tự ghi) thay vì created_at: created_at chỉ chính xác
+    đến giây nên nhiều log cùng giây sẽ bị "hòa", dẫn tới xóa nhầm dòng mới / giữ lại dòng cũ.
+    """
     if max_rows is None:
-        cfg = get_setting(conn, "logs", {"max_rows": 500})
-        max_rows = int(cfg.get("max_rows", 500))
+        max_rows = _logs_max_rows(conn)
     max_rows = max(50, min(10000, int(max_rows)))
-    total = conn.execute("SELECT COUNT(*) AS c FROM logs").fetchone()["c"]
-    if total <= max_rows:
-        return
-    conn.execute(
-        """
-        DELETE FROM logs
-        WHERE id NOT IN (
-          SELECT id FROM logs ORDER BY created_at DESC LIMIT ?
-        )
-        """,
+    # rowid của dòng thứ (max_rows + 1) tính từ mới nhất: mọi dòng có rowid <= giá trị này là dư
+    row = conn.execute(
+        "SELECT rowid FROM logs ORDER BY rowid DESC LIMIT 1 OFFSET ?",
         (max_rows,),
-    )
+    ).fetchone()
+    if row is None:
+        return
+    conn.execute("DELETE FROM logs WHERE rowid <= ?", (row[0],))
 
 
 def add_log(conn: sqlite3.Connection, service: str, severity: str, message: str) -> str:
@@ -331,5 +340,10 @@ def add_log(conn: sqlite3.Connection, service: str, severity: str, message: str)
         "INSERT INTO logs (id, time, service, severity, message, created_at) VALUES (?, ?, ?, ?, ?, ?)",
         (log_id, now[11:19], service, severity, message, now),
     )
-    prune_logs(conn)
+    # Dọn log cũ chỉ là việc phụ: nếu lỗi cũng không được làm hỏng thao tác chính
+    # (ví dụ ghi sự kiện nhận diện chạy chung transaction với add_log).
+    try:
+        prune_logs(conn)
+    except Exception:
+        pass
     return log_id
