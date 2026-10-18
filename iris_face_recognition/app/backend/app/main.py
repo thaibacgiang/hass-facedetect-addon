@@ -1693,6 +1693,19 @@ def _release_camera(camera_id: str) -> None:
         _camera_busy.discard(camera_id)
 
 
+_busy_log_last: dict[str, float] = {}
+BUSY_LOG_SECONDS = 30
+
+
+def _log_busy_skip(camera: dict, source: str) -> None:
+    now = time.monotonic()
+    if now - _busy_log_last.get(camera["id"], -1e9) < BUSY_LOG_SECONDS:
+        return
+    _busy_log_last[camera["id"]] = now
+    with connect() as conn:
+        add_log(conn, "Recognition", "info", f"Bỏ qua kích hoạt {source} cho {camera['name']}: camera đang xử lý lần kích hoạt trước")
+
+
 def camera_in_cooldown(camera: dict) -> bool:
     """Chỉ tính thời gian chờ từ lần PHÁT HIỆN được khuôn mặt gần nhất (last_detection)."""
     if not camera.get("last_detection"):
@@ -1969,25 +1982,33 @@ def request_camera_trigger(trigger_slug: str, source: str = "API") -> dict:
     if camera["status"] != "online":
         raise HTTPException(status_code=409, detail="Camera is offline.")
 
-    skip_reason = ""
     if camera_in_cooldown(camera):
-        skip_reason = "cooldown"
-    elif not _claim_camera(camera["id"]):
-        skip_reason = "busy"
-    if skip_reason:
-        event = create_event_shell(camera["id"], camera["name"], f"Skipped {skip_reason}", "skipped", update_camera=False)
-        reason_text = "đang trong thời gian chờ" if skip_reason == "cooldown" else "camera đang xử lý lần kích hoạt trước"
+        event = create_event_shell(camera["id"], camera["name"], "Skipped cooldown", "skipped", update_camera=False)
         with connect() as conn:
-            add_log(conn, "Recognition", "warn", f"Bỏ qua kích hoạt {source} cho {camera['name']} do {reason_text}")
+            add_log(conn, "Recognition", "warn", f"Bỏ qua kích hoạt {source} cho {camera['name']} do đang trong thời gian chờ")
         return {
             "ok": True,
             "accepted": False,
             "skipped": True,
-            "reason": skip_reason,
+            "reason": "cooldown",
             "camera_id": camera["id"],
             "camera_name": camera["name"],
             "event_id": event["id"],
             "event": event,
+        }
+    if not _claim_camera(camera["id"]):
+        # Camera đang xử lý lần kích hoạt trước (ví dụ tự động hóa bấm lặp lại sau vài giây):
+        # chỉ ghi log (giới hạn tần suất), KHÔNG tạo sự kiện "Skipped" làm rối danh sách.
+        _log_busy_skip(camera, source)
+        return {
+            "ok": True,
+            "accepted": False,
+            "skipped": True,
+            "reason": "busy",
+            "camera_id": camera["id"],
+            "camera_name": camera["name"],
+            "event_id": None,
+            "event": None,
         }
 
     # Không đặt last_detection ở đây: thời gian chờ chỉ bắt đầu khi thật sự thấy khuôn mặt,

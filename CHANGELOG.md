@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.1 - 2026-10-18
+
+- Kích hoạt bị bỏ qua vì camera đang bận xử lý lần trước (ví dụ tự động hóa bấm lặp lại sau vài giây) không còn tạo sự kiện "Skipped" nữa; chỉ ghi nhật ký, tối đa 1 dòng mỗi 30 giây cho mỗi camera.
+
 ## 1.2.0 - 2026-10-18
 
 - **Chụp liên tiếp nhiều khung hình** mỗi lần kích hoạt (mặc định 5 khung, cách nhau 1 giây) thay vì chỉ 1 ảnh đúng lúc bấm nút. Dừng sớm khi nhận ra người quen, nếu không thì chọn khung tốt nhất (có mặt, giống nhất, mặt to nhất). Chỉ lưu 1 ảnh được chọn.
