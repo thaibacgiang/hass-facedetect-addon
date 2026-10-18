@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.2 - 2026-10-18
+
+- Sửa giới hạn lưu nhật ký: khi đủ số dòng đã đặt, hệ thống xóa đúng các dòng cũ nhất và luôn giữ các dòng mới nhất (trước đây nhiều log trong cùng 1 giây bị xóa/giữ lẫn lộn do sắp xếp theo thời gian chỉ chính xác đến giây).
+- Trang nhật ký sắp xếp ổn định, phân trang không còn bị xáo trộn.
+- Lỗi khi dọn nhật ký không còn làm hỏng việc ghi sự kiện nhận diện.
+
 ## 1.1.0 - 2026-10-03
 
 - Việt hóa toàn bộ giao diện web, thông báo và nhật ký hệ thống; thời gian hiển thị theo định dạng Việt Nam.
