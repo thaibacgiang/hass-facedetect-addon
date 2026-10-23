@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.2 - 2026-10-21
+
+- Sửa lỗi `database is locked` khiến sự kiện kẹt ở "Đang xử lý" hoặc báo lỗi khi nhiều camera kích hoạt cùng lúc: bật chế độ WAL, tăng thời gian chờ khóa DB từ 5 lên 30 giây, tự thử lại khi DB đang bận.
+- Sự kiện không còn kẹt mãi ở "Đang xử lý": lỗi khi xử lý luôn được ghi nhận, và sự kiện bị bỏ dở quá 5 phút (hoặc còn sót sau khi khởi động lại) tự được đóng thành lỗi.
+- Dọn dẹp lưu trữ không còn chặn việc khởi động (chạy nền, trễ 30 giây), ghi DB theo lô thay vì từng ảnh, và chỉ một lượt dọn chạy tại một thời điểm.
+- Lỗi khi ghi nhật ký phụ không còn làm hỏng kết quả nhận diện.
+
 ## 1.2.1 - 2026-10-18
 
 - Kích hoạt bị bỏ qua vì camera đang bận xử lý lần trước (ví dụ tự động hóa bấm lặp lại sau vài giây) không còn tạo sự kiện "Skipped" nữa; chỉ ghi nhật ký, tối đa 1 dòng mỗi 30 giây cho mỗi camera.

@@ -7,7 +7,7 @@ import sqlite3
 import threading
 import time
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import BytesIO
 from typing import Annotated
 
@@ -19,7 +19,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 from . import insightface_engine, mqtt_homeassistant, telegram_notify
 from .burst import run_burst
 from .camera_utils import ensure_unique_camera_name, serialize_camera, unique_camera_slug
-from .db import UPLOAD_DIR, add_log, clear_database, connect, get_setting, init_db, new_id, prune_logs, _logs_max_rows, row_to_dict, rows_to_dicts, set_setting, utc_now
+from .db import UPLOAD_DIR, add_log, clear_database, connect, with_db_retry, get_setting, init_db, new_id, prune_logs, _logs_max_rows, row_to_dict, rows_to_dicts, set_setting, utc_now
 from .people_utils import display_person_name, person_name_from_external_id, person_preview_data, serialize_person
 from .schemas import EventsBulkDeleteIn, InsightFaceSettingsIn, CameraIn, LogsSettingsIn, MqttSettingsIn, PersonIn, StorageSettingsIn, TelegramSettingsIn, ThresholdsIn
 from .storage_service import DEFAULT_STORAGE, cleanup_storage_to_quota, delete_unreferenced_uploads, enforce_storage_quota, normalize_upload_ref, start_storage_cleanup_job, stop_storage_cleanup_job, storage_config, storage_status, sync_storage_from_env
@@ -600,6 +600,10 @@ def startup() -> None:
     rebuild_missing_embeddings()
     restart_mqtt_command_listener()
     sync_storage_from_env()
+    try:
+        expire_stale_processing_events(60)
+    except Exception:  # noqa: BLE001
+        pass
     start_storage_cleanup_job()
     start_camera_auto_job()
 
@@ -1353,18 +1357,22 @@ def create_event_shell(
 ) -> dict:
     now = utc_now()
     event_id = new_id("evt")
-    with connect() as conn:
-        conn.execute(
-            """
-            INSERT INTO events
-            (id, person_name, confidence, camera_id, camera_name, type, inference_id, image_path, event_time, created_at)
-            VALUES (?, ?, 0, ?, ?, ?, '', '', ?, ?)
-            """,
-            (event_id, person_name, camera_id, camera_name, event_type, now, now),
-        )
-        if camera_id and update_camera:
-            conn.execute("UPDATE cameras SET last_detection = ?, updated_at = ? WHERE id = ?", (now, now, camera_id))
-        add_log(conn, "Recognition", "info", f"Đã nhận kích hoạt từ {camera_name}")
+
+    def _write() -> None:
+        with connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO events
+                (id, person_name, confidence, camera_id, camera_name, type, inference_id, image_path, event_time, created_at)
+                VALUES (?, ?, 0, ?, ?, ?, '', '', ?, ?)
+                """,
+                (event_id, person_name, camera_id, camera_name, event_type, now, now),
+            )
+            if camera_id and update_camera:
+                conn.execute("UPDATE cameras SET last_detection = ?, updated_at = ? WHERE id = ?", (now, now, camera_id))
+            add_log(conn, "Recognition", "info", f"Đã nhận kích hoạt từ {camera_name}")
+
+    with_db_retry(_write)
     return get_event(event_id)
 
 
@@ -1381,31 +1389,35 @@ def mark_event_failed(
 ) -> dict:
     now = utc_now()
     thumb_path, face_crop_path, _ = create_event_images(rel_path, None)
-    with connect() as conn:
-        conn.execute(
-            """
-            INSERT INTO events
-            (id, person_name, confidence, camera_id, camera_name, type, inference_id, processing_ms, image_path, thumb_path, face_crop_path, event_time, created_at)
-            VALUES (?, ?, 0, ?, ?, ?, '', ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-              person_id = NULL,
-              person_name = excluded.person_name,
-              confidence = 0,
-              camera_id = COALESCE(NULLIF(excluded.camera_id, ''), camera_id),
-              camera_name = excluded.camera_name,
-              type = excluded.type,
-              face_id = NULL,
-              inference_id = '',
-              processing_ms = excluded.processing_ms,
-              image_path = excluded.image_path,
-              thumb_path = excluded.thumb_path,
-              face_crop_path = excluded.face_crop_path,
-              original_deleted_at = NULL,
-              event_time = excluded.event_time
-            """,
-            (event_id, person_name, camera_id, camera_name, event_type, processing_ms, rel_path, thumb_path, face_crop_path, now, now),
-        )
-        add_log(conn, "Recognition", "warn", f"{message} tại {camera_name}")
+
+    def _write() -> None:
+        with connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO events
+                (id, person_name, confidence, camera_id, camera_name, type, inference_id, processing_ms, image_path, thumb_path, face_crop_path, event_time, created_at)
+                VALUES (?, ?, 0, ?, ?, ?, '', ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  person_id = NULL,
+                  person_name = excluded.person_name,
+                  confidence = 0,
+                  camera_id = COALESCE(NULLIF(excluded.camera_id, ''), camera_id),
+                  camera_name = excluded.camera_name,
+                  type = excluded.type,
+                  face_id = NULL,
+                  inference_id = '',
+                  processing_ms = excluded.processing_ms,
+                  image_path = excluded.image_path,
+                  thumb_path = excluded.thumb_path,
+                  face_crop_path = excluded.face_crop_path,
+                  original_deleted_at = NULL,
+                  event_time = excluded.event_time
+                """,
+                (event_id, person_name, camera_id, camera_name, event_type, processing_ms, rel_path, thumb_path, face_crop_path, now, now),
+            )
+            add_log(conn, "Recognition", "warn", f"{message} tại {camera_name}")
+
+    with_db_retry(_write)
     if publish:
         publish_mqtt_recognition_if_configured(event_id)
     return get_event(event_id)
@@ -1752,6 +1764,52 @@ def make_frame_probe(references: list[dict], match_threshold: float):
     return probe
 
 
+def _fail_trigger_event(event_id: str, camera: dict, label: str, event_type: str, detail: str) -> None:
+    """Đưa sự kiện về trạng thái kết thúc (lỗi / không có mặt) và KHÔNG BAO GIỜ ném lỗi ra ngoài.
+
+    Nếu ghi bình thường vẫn thất bại (ví dụ DB khóa kéo dài) thì cập nhật tối thiểu để sự kiện
+    không bị kẹt mãi ở "Đang xử lý".
+    """
+    camera_name = camera["name"]
+    try:
+        event = mark_event_failed(event_id, label, camera_name, detail, event_type=event_type, camera_id=camera["id"])
+    except Exception:  # noqa: BLE001
+        try:
+            def _minimal() -> None:
+                with connect() as conn:
+                    conn.execute(
+                        "UPDATE events SET type = ?, person_name = ? WHERE id = ? AND type = 'processing'",
+                        (event_type, label, event_id),
+                    )
+
+            with_db_retry(_minimal, attempts=8, base_delay=1.0)
+        except Exception:  # noqa: BLE001
+            pass
+        return
+    try:
+        send_telegram_for_event(event, label, event_type, 0, event.get("image_path", ""))
+    except Exception:  # noqa: BLE001
+        pass
+    enforce_storage_quota()
+
+
+STALE_PROCESSING_SECONDS = 300
+
+
+def expire_stale_processing_events(max_age_seconds: int = STALE_PROCESSING_SECONDS) -> int:
+    """Sự kiện kẹt ở "Đang xử lý" quá lâu (luồng bị chết, add-on khởi động lại...) -> đánh dấu lỗi."""
+    cutoff = (datetime.fromisoformat(utc_now()) - timedelta(seconds=max_age_seconds)).isoformat()
+    with connect() as conn:
+        cursor = conn.execute(
+            "UPDATE events SET type = 'error', person_name = 'Processing timed out' WHERE type = 'processing' AND created_at < ?",
+            (cutoff,),
+        )
+        expired = cursor.rowcount or 0
+        if expired:
+            add_log(conn, "Recognition", "warn", f"Đã đóng {expired} sự kiện bị kẹt ở trạng thái đang xử lý quá {max_age_seconds} giây")
+    return expired
+
+
 def process_camera_trigger_event(event_id: str, camera: dict, first_frame: tuple[bytes, str] | None = None) -> None:
     """Chụp liên tiếp nhiều khung hình, chọn khung tốt nhất rồi nhận diện.
 
@@ -1773,25 +1831,28 @@ def process_camera_trigger_event(event_id: str, camera: dict, first_frame: tuple
         )
         chosen = burst.best or burst.last
         rel_path = save_image_bytes(chosen.image, "events", chosen.suffix)
-        with connect() as conn:
-            add_log(
-                conn,
-                "Recognition",
-                "info",
-                f"Camera {camera_name}: đã phân tích {burst.tried} khung hình, {burst.face_frames} khung có khuôn mặt",
-            )
+        try:  # log phụ: lỗi ghi log không được làm hỏng kết quả nhận diện
+            with connect() as conn:
+                add_log(
+                    conn,
+                    "Recognition",
+                    "info",
+                    f"Camera {camera_name}: đã phân tích {burst.tried} khung hình, {burst.face_frames} khung có khuôn mặt",
+                )
+        except Exception:  # noqa: BLE001
+            pass
         recognize_image_bytes(chosen.image, rel_path, camera["id"], camera_name, event_id)
     except HTTPException as error:
         detail = str(error.detail)
-        label = "No face detected" if is_no_face_error(Exception(detail)) else "Trigger processing failed"
-        event_type = "no_face" if label == "No face detected" else "error"
-        event = mark_event_failed(event_id, label, camera_name, detail, event_type=event_type, camera_id=camera["id"])
-        send_telegram_for_event(event, label, event_type, 0, event.get("image_path", ""))
-        enforce_storage_quota()
+        no_face = is_no_face_error(Exception(detail))
+        _fail_trigger_event(
+            event_id, camera,
+            "No face detected" if no_face else "Trigger processing failed",
+            "no_face" if no_face else "error",
+            detail,
+        )
     except Exception as error:  # noqa: BLE001
-        event = mark_event_failed(event_id, "Trigger processing failed", camera_name, str(error), event_type="error", camera_id=camera["id"])
-        send_telegram_for_event(event, "Trigger processing failed", "error", 0, event.get("image_path", ""))
-        enforce_storage_quota()
+        _fail_trigger_event(event_id, camera, "Trigger processing failed", "error", str(error))
     finally:
         _release_camera(camera["id"])
 
@@ -1854,7 +1915,14 @@ def camera_auto_scan_once() -> None:
 
 
 def _camera_auto_loop() -> None:
+    ticks = 0
     while not _auto_stop.wait(1.0):
+        ticks += 1
+        if ticks % 60 == 0:
+            try:
+                expire_stale_processing_events()
+            except Exception:  # noqa: BLE001
+                pass
         try:
             camera_auto_scan_once()
         except Exception:  # noqa: BLE001

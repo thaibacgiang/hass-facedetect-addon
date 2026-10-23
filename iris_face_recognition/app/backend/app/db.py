@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import sqlite3
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -39,12 +40,21 @@ def ensure_dirs() -> None:
         shutil.move(str(legacy_models), str(MODEL_DIR))
 
 
+# Nhiều luồng (nhiều camera, dọn dẹp lưu trữ, MQTT...) cùng ghi vào một file SQLite.
+# Mặc định SQLite chỉ chờ khóa 5 giây rồi báo "database is locked", nên cho chờ lâu hơn.
+DB_BUSY_TIMEOUT_SECONDS = 30
+_wal_enabled = False
+
+
 @contextmanager
 def connect() -> Iterator[sqlite3.Connection]:
     ensure_dirs()
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=DB_BUSY_TIMEOUT_SECONDS)
     conn.row_factory = sqlite3.Row
+    conn.execute(f"PRAGMA busy_timeout = {DB_BUSY_TIMEOUT_SECONDS * 1000}")
     conn.execute("PRAGMA foreign_keys = ON")
+    if _wal_enabled:
+        conn.execute("PRAGMA synchronous = NORMAL")
     try:
         yield conn
         conn.commit()
@@ -53,6 +63,37 @@ def connect() -> Iterator[sqlite3.Connection]:
         raise
     finally:
         conn.close()
+
+
+def enable_wal() -> bool:
+    """Bật chế độ WAL: người đọc không chặn người ghi, ghi nhanh hơn nhiều khi có nhiều luồng."""
+    global _wal_enabled
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=DB_BUSY_TIMEOUT_SECONDS)
+        try:
+            mode = conn.execute("PRAGMA journal_mode = WAL").fetchone()[0]
+        finally:
+            conn.close()
+        _wal_enabled = str(mode).lower() == "wal"
+    except sqlite3.Error:
+        _wal_enabled = False
+    return _wal_enabled
+
+
+def is_db_locked_error(error: BaseException) -> bool:
+    message = str(error).lower()
+    return isinstance(error, sqlite3.OperationalError) and ("locked" in message or "busy" in message)
+
+
+def with_db_retry(func, attempts: int = 5, base_delay: float = 0.5):
+    """Chạy `func`; nếu DB đang bị khóa thì chờ rồi thử lại (tăng dần thời gian chờ)."""
+    for attempt in range(attempts):
+        try:
+            return func()
+        except sqlite3.OperationalError as error:
+            if not is_db_locked_error(error) or attempt == attempts - 1:
+                raise
+            time.sleep(base_delay * (attempt + 1))
 
 
 def row_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -85,6 +126,7 @@ def set_setting(conn: sqlite3.Connection, key: str, value: Any) -> None:
 
 def init_db() -> None:
     ensure_dirs()
+    enable_wal()
     with connect() as conn:
         conn.executescript(
             """

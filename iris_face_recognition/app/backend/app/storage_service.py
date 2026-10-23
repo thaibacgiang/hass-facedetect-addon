@@ -4,12 +4,14 @@ import os
 import threading
 import time
 
-from .db import UPLOAD_DIR, add_log, connect, get_setting, rows_to_dicts, set_setting, utc_now
+from .db import UPLOAD_DIR, add_log, connect, get_setting, rows_to_dicts, set_setting, utc_now, with_db_retry
 from .uploads import safe_upload_path
 
 
 DEFAULT_STORAGE = {"max_storage_mb": 2048, "target_percent": 90, "auto_cleanup": True}
 CLEANUP_INTERVAL_SECONDS = 600
+CLEANUP_STARTUP_DELAY_SECONDS = 30
+CLEANUP_BATCH_SIZE = 50
 
 
 def storage_config(storage: dict | None) -> dict:
@@ -209,7 +211,20 @@ def cleanup_rank(event: dict, auto_accept: int) -> int:
     return 100
 
 
+_cleanup_run_lock = threading.Lock()
+
+
 def cleanup_storage_to_quota(force: bool = False) -> dict:
+    """Mỗi lúc chỉ một lượt dọn dẹp chạy: các lần gọi tự động khác (sau mỗi sự kiện) bỏ qua nếu đang dọn."""
+    if not _cleanup_run_lock.acquire(blocking=force):
+        return {"ok": True, "skipped": True, "deleted_files": 0, "deleted_bytes": 0, "used_bytes": 0, "max_bytes": 0}
+    try:
+        return _cleanup_storage_to_quota(force)
+    finally:
+        _cleanup_run_lock.release()
+
+
+def _cleanup_storage_to_quota(force: bool = False) -> dict:
     with connect() as conn:
         storage = storage_config(get_setting(conn, "storage", DEFAULT_STORAGE))
         thresholds = get_setting(conn, "thresholds", {"match": 40, "auto_accept": 55})
@@ -242,6 +257,24 @@ def cleanup_storage_to_quota(force: bool = False) -> dict:
         )
     events.sort(key=lambda event: (cleanup_rank(event, int(thresholds.get("auto_accept", 55))), event.get("created_at") or ""))
 
+    # Ghi DB theo lô (một giao dịch cho nhiều ảnh) thay vì mỗi ảnh một lần ghi: dọn hàng trăm ảnh
+    # không còn giữ khóa DB hay làm các camera đang xử lý bị "database is locked".
+    pending_ids: list[str] = []
+
+    def flush_pending() -> None:
+        if not pending_ids:
+            return
+        stamp = utc_now()
+        batch = [(stamp, event_id) for event_id in pending_ids]
+        pending_ids.clear()
+
+        def _write() -> None:
+            with connect() as conn:
+                conn.executemany("UPDATE events SET image_path = '', original_deleted_at = ? WHERE id = ?", batch)
+
+        with_db_retry(_write)
+        time.sleep(0.05)  # nhường DB cho các luồng nhận diện
+
     for event in events:
         if used_bytes <= target_bytes:
             break
@@ -250,19 +283,20 @@ def cleanup_storage_to_quota(force: bool = False) -> dict:
             continue
         file_path = safe_upload_path(image_path)
         if not file_path or not file_path.is_file():
-            with connect() as conn:
-                conn.execute("UPDATE events SET image_path = '', original_deleted_at = ? WHERE id = ?", (utc_now(), event["id"]))
-            continue
-        size = upload_file_size(image_path)
-        try:
-            file_path.unlink()
-        except OSError:
-            continue
-        with connect() as conn:
-            conn.execute("UPDATE events SET image_path = '', original_deleted_at = ? WHERE id = ?", (utc_now(), event["id"]))
-        used_bytes = max(0, used_bytes - size)
-        deleted_bytes += size
-        deleted_files += 1
+            pending_ids.append(event["id"])
+        else:
+            size = upload_file_size(image_path)
+            try:
+                file_path.unlink()
+            except OSError:
+                continue
+            pending_ids.append(event["id"])
+            used_bytes = max(0, used_bytes - size)
+            deleted_bytes += size
+            deleted_files += 1
+        if len(pending_ids) >= CLEANUP_BATCH_SIZE:
+            flush_pending()
+    flush_pending()
 
     if deleted_files:
         with connect() as conn:
@@ -302,8 +336,11 @@ _cleanup_stop = threading.Event()
 
 
 def _cleanup_loop() -> None:
-    while not _cleanup_stop.wait(CLEANUP_INTERVAL_SECONDS):
+    # Lần đầu chạy sau khi hệ thống đã khởi động xong (không chặn việc khởi động / nhận kích hoạt)
+    delay = CLEANUP_STARTUP_DELAY_SECONDS
+    while not _cleanup_stop.wait(delay):
         enforce_storage_quota()
+        delay = CLEANUP_INTERVAL_SECONDS
 
 
 def start_storage_cleanup_job() -> None:
@@ -312,7 +349,6 @@ def start_storage_cleanup_job() -> None:
     if _cleanup_thread and _cleanup_thread.is_alive():
         return
     _cleanup_stop.clear()
-    enforce_storage_quota()
     _cleanup_thread = threading.Thread(target=_cleanup_loop, name="storage-cleanup", daemon=True)
     _cleanup_thread.start()
 
